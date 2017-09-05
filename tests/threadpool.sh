@@ -22,6 +22,7 @@ function test_mass_addition { #endsum #threads
 
 
 # Run tests
+test_mass_addition 5000000 4
 test_mass_addition 100 4
 test_mass_addition 100 1000
 test_mass_addition 100000 1000

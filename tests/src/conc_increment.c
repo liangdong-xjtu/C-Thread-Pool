@@ -32,10 +32,23 @@ int main(int argc, char *argv[]){
 	for (n=0; n<num_jobs; n++){
 		thpool_add_work(thpool, (void*)increment, NULL);
 	}
-	
+    printf("sum = %d\n", sum);
+
+	thpool = thpool_init(num_threads);
+	for (n=0; n<num_jobs; n++){
+		thpool_add_work(thpool, (void*)increment, NULL);
+	}
+    printf("sum = %d\n", sum);
+
+	thpool = thpool_init(num_threads);
+	for (n=0; n<num_jobs; n++){
+		thpool_add_work(thpool, (void*)increment, NULL);
+	}
+    printf("sum = %d\n", sum);
+
 	thpool_wait(thpool);
 
-	printf("%d\n", sum);
+	printf("%d\n", sum/3);
 
 	return 0;
 }
