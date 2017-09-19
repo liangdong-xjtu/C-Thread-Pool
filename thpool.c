@@ -18,6 +18,7 @@
 #include <time.h>
 #if defined(__linux__)
 #include <sys/prctl.h>
+#include <linux/list.h>
 #endif
 
 #include "thpool.h"
@@ -73,12 +74,14 @@ typedef struct thread{
 	int       id;                        /* friendly id               */
 	pthread_t pthread;                   /* pointer to actual thread  */
 	struct thpool_* thpool_p;            /* access to thpool          */
+    list_head_t list;
 } thread;
 
 
 /* Threadpool */
 typedef struct thpool_{
-	thread**   threads;                  /* pointer to threads        */
+//	thread**   threads;                  /* pointer to threads        */
+    list_head_t threads_list_head;
 	volatile int num_threads_alive;      /* threads currently alive   */
 	volatile int num_threads_working;    /* threads currently working */
 	pthread_mutex_t  thcount_lock;       /* used for thread count etc */
@@ -93,7 +96,7 @@ typedef struct thpool_{
 /* ========================== PROTOTYPES ============================ */
 
 
-static int  thread_init(thpool_* thpool_p, struct thread** thread_p, int id);
+static int  thread_init(thpool_* thpool_p, list_head_t threads_list_head, int id);
 static void* thread_do(struct thread* thread_p);
 static void  thread_hold(int sig_id);
 static void  thread_destroy(struct thread* thread_p);
@@ -145,13 +148,16 @@ struct thpool_* thpool_init(int num_threads){
 	}
 
 	/* Make threads in pool */
-	thpool_p->threads = (struct thread**)malloc(num_threads * sizeof(struct thread *));
+//	thpool_p->threads = (struct thread**)malloc(num_threads * sizeof(struct thread *));
+    INIT_LIST_HEAD(&thpool_p->threads_list_head);
+#if 0
 	if (thpool_p->threads == NULL){
 		err("thpool_init(): Could not allocate memory for threads\n");
 		jobqueue_destroy(&thpool_p->jobqueue);
 		free(thpool_p);
 		return NULL;
 	}
+#endif
 
 	pthread_mutex_init(&(thpool_p->thcount_lock), NULL);
 	pthread_cond_init(&thpool_p->threads_all_idle, NULL);
@@ -159,7 +165,8 @@ struct thpool_* thpool_init(int num_threads){
 	/* Thread init */
 	int n;
 	for (n=0; n<num_threads; n++){
-		thread_init(thpool_p, &thpool_p->threads[n], n);
+		thread_init(thpool_p, thpool_p->threads_list_head, n);
+//		thread_init(thpool_p, &thpool_p->threads[n], n);
 #if THPOOL_DEBUG
 			printf("THPOOL_DEBUG: Created thread %d in pool \n", n);
 #endif
@@ -234,10 +241,15 @@ void thpool_destroy(thpool_* thpool_p){
 	jobqueue_destroy(&thpool_p->jobqueue);
 	/* Deallocs */
 	int n;
+#if 0    
 	for (n=0; n < threads_total; n++){
 		thread_destroy(thpool_p->threads[n]);
 	}
-	free(thpool_p->threads);
+#endif
+    struct thread* thread_p;
+    list_for_each_entry(thread_p, &thpool_p->threads_list_head, list)
+        free(thread_p);
+//	free(thpool_p->threads);
 	free(thpool_p);
 }
 
@@ -245,9 +257,14 @@ void thpool_destroy(thpool_* thpool_p){
 /* Pause all threads in threadpool */
 void thpool_pause(thpool_* thpool_p) {
 	int n;
+#if 0
 	for (n=0; n < thpool_p->num_threads_alive; n++){
 		pthread_kill(thpool_p->threads[n]->pthread, SIGUSR1);
 	}
+#endif
+    struct thread* thread_p;
+    list_for_each_entry(thread_p, &thpool_p->threads_list_head, list)
+        pthread_kill(thread_p->pthread, SIGUSR1);
 }
 
 
@@ -266,7 +283,27 @@ int thpool_num_threads_working(thpool_* thpool_p){
 	return thpool_p->num_threads_working;
 }
 
+int thpool_double(thpool_* thpool_p) {
+    return 0;
+}
 
+int thpool_half(thpool_* thpool_p) {
+    return 0;
+}
+
+void thpool_scale(thpool_* thpool_p) {
+    int errno;
+    if (thpool_num_threads_working(thpool_p) > (thpool_p->num_threads_alive)/2) {
+        errno = thpool_double(thpool_p);
+        if (errno < 0)
+            err("[Warning] thpool_double(): Could not double the number of threads\n");
+    }
+    else if(thpool_num_threads_working(thpool_p) < (thpool_p->num_threads_alive)/4) {
+        errno = thpool_half(thpool_p);
+        if (errno < 0)
+            err("[Warning] thpool_half(): Could not half the number of threads\n");
+    }
+}
 
 
 
@@ -279,19 +316,21 @@ int thpool_num_threads_working(thpool_* thpool_p){
  * @param id            id to be given to the thread
  * @return 0 on success, -1 otherwise.
  */
-static int thread_init (thpool_* thpool_p, struct thread** thread_p, int id){
+static int thread_init (thpool_* thpool_p, list_head_t threads_list_head, int id){
 
-	*thread_p = (struct thread*)malloc(sizeof(struct thread));
+    struct thread* thread_p = (struct thread*)malloc(sizeof(struct thread));
 	if (thread_p == NULL){
 		err("thread_init(): Could not allocate memory for thread\n");
 		return -1;
 	}
 
-	(*thread_p)->thpool_p = thpool_p;
-	(*thread_p)->id       = id;
+	(thread_p)->thpool_p = thpool_p;
+	(thread_p)->id       = id;
+    INIT_LIST_HEAD(&thread_p->list);
+    list_add(&thread_p->list, &threads_list_head);
 
-	pthread_create(&(*thread_p)->pthread, NULL, (void *)thread_do, (*thread_p));
-	pthread_detach((*thread_p)->pthread);
+	pthread_create(&(thread_p)->pthread, NULL, (void *)thread_do, (thread_p));
+	pthread_detach((thread_p)->pthread);
 	return 0;
 }
 
