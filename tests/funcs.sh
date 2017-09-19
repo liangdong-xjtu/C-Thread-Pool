@@ -48,5 +48,5 @@ function err { #string #log
 
 
 function compile { #cfilepath
-	gcc $COMPILATION_FLAGS "$1" ../thpool.c -D THPOOL_DEBUG -pthread -o test
+	gcc $COMPILATION_FLAGS "$1" ../thpool.c -D THPOOL_DEBUG -pthread -o test -I../include
 }
