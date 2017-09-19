@@ -37,6 +37,7 @@ int main(int argc, char *argv[]) {
     for (n=0; n<num_jobs; n++){
         np[n] = n;
         thpool_add_work(thpool, (void*)print, (void*)(&np[n]));
+        //thpool_scale(thpool, num_threads);
     }
     thpool_wait(thpool);
     printf("\nDone: max_print = %d\n", max_print);

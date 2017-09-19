@@ -100,6 +100,7 @@ static int  thread_init(thpool_* thpool_p, list_head_t threads_list_head, int id
 static void* thread_do(struct thread* thread_p);
 static void  thread_hold(int sig_id);
 static void  thread_destroy(struct thread* thread_p);
+static void thpool_scale_deamon(thpool_* thpool_p);
 
 static int   jobqueue_init(jobqueue* jobqueue_p);
 static void  jobqueue_clear(jobqueue* jobqueue_p);
@@ -174,6 +175,8 @@ struct thpool_* thpool_init(int num_threads){
 
 	/* Wait for threads to initialize */
 	while (thpool_p->num_threads_alive != num_threads) {}
+    pthread_t pthread;
+    pthread_create(&pthread, NULL, (void *)thpool_scale_deamon, thpool_p);
 
 	return thpool_p;
 }
@@ -284,6 +287,21 @@ int thpool_num_threads_working(thpool_* thpool_p){
 }
 
 int thpool_double(thpool_* thpool_p) {
+    /* Thread init */
+    int n;
+    int num_threads = thpool_p->num_threads_alive;
+    int errno;
+    for (n=0; n<num_threads; n++){
+        errno = thread_init(thpool_p, thpool_p->threads_list_head, n);
+        if (errno != 0)
+            return errno;
+#if THPOOL_DEBUG
+            printf("THPOOL_DEBUG: Created thread %d in pool \n", n);
+#endif
+    }
+
+    /* Wait for threads to initialize */
+    while (thpool_p->num_threads_alive != 2*num_threads) {}
     return 0;
 }
 
@@ -293,15 +311,49 @@ int thpool_half(thpool_* thpool_p) {
 
 void thpool_scale(thpool_* thpool_p) {
     int errno;
+#if 0
     if (thpool_num_threads_working(thpool_p) > (thpool_p->num_threads_alive)/2) {
         errno = thpool_double(thpool_p);
-        if (errno < 0)
+        if (errno != 0)
             err("[Warning] thpool_double(): Could not double the number of threads\n");
     }
     else if(thpool_num_threads_working(thpool_p) < (thpool_p->num_threads_alive)/4) {
         errno = thpool_half(thpool_p);
-        if (errno < 0)
+        if (errno != 0)
             err("[Warning] thpool_half(): Could not half the number of threads\n");
+    }
+#else
+
+    printf("[thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive] = [%d,%d]\n", thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive);
+    if (thpool_num_threads_working(thpool_p) > 0.8*(thpool_p->num_threads_alive)) {
+        printf("[thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive] = [%d,%d]\n", thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive);
+        errno = thpool_double(thpool_p);
+        if (errno != 0)
+            err("[Warning] thpool_double(): Could not double the number of threads\n");
+    }
+    else if(thpool_num_threads_working(thpool_p) < 0.2*(thpool_p->num_threads_alive)) {
+        errno = thpool_half(thpool_p);
+        if (errno != 0)
+            err("[Warning] thpool_half(): Could not half the number of threads\n");
+    }
+#endif
+}
+
+void thpool_scale_deamon(thpool_* thpool_p) {
+    int errno;
+    while(1) {
+        if (thpool_num_threads_working(thpool_p) > 0.8*(thpool_p->num_threads_alive)) {
+            printf("[thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive] = [%d,%d]\n", thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive);
+            errno = thpool_double(thpool_p);
+            if (errno != 0)
+                err("[Warning] thpool_double(): Could not double the number of threads\n");
+        }
+        else if(thpool_num_threads_working(thpool_p) < 0.2*(thpool_p->num_threads_alive)) {
+            errno = thpool_half(thpool_p);
+            if (errno != 0)
+                err("[Warning] thpool_half(): Could not half the number of threads\n");
+        }
+        usleep(10*1000);
     }
 }
 
