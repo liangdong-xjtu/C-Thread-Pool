@@ -12,7 +12,7 @@ void* print(void* argp) {
     if ( max_print < num )
         max_print = num;
     int i=0;
-    while(i<10) {
+    while(i<1) {
         printf("%d.", num);
         usleep(500*1000);
         fflush(stdout);
@@ -41,6 +41,8 @@ int main(int argc, char *argv[]) {
     }
     thpool_wait(thpool);
     printf("\nDone: max_print = %d\n", max_print);
+    thpool_destroy(thpool);
+    sleep(1);
 
     return 0;
 }
