@@ -445,7 +445,8 @@ static inline void list_splice_tail_init(struct list_head *list,
  * @member:	the name of the list_head within the struct.
  */
 #define list_for_each_entry(pos, head, member)				\
-	for (pos = list_first_entry(head, typeof(*pos), member);	\
+	for (pos = list_first_entry(head, typeof(*pos), member),	\
+        info("%s+%d: pos = %p, &pos->member = %p, head = %p\n", __func__, __LINE__, pos, &pos->member, head);\
 	     &pos->member != (head);					\
 	     pos = list_next_entry(pos, member))
 

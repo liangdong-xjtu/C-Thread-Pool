@@ -12,7 +12,7 @@ void* print(void* argp) {
     if ( max_print < num )
         max_print = num;
     int i=0;
-    while(i<1) {
+    while(i<5) {
         printf("%d.", num);
         usleep(500*1000);
         fflush(stdout);

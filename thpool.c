@@ -30,15 +30,15 @@
 #endif
 
 #if !defined(DISABLE_PRINT) || defined(THPOOL_DEBUG)
-#define err(str) fprintf(stderr, str)
+#define err(str, ...) fprintf(stderr, str, ##__VA_ARGS__)
 #if THPOOL_DEBUG
 #define info(str, ...) fprintf(stdout, str, ##__VA_ARGS__)
 #else
-#define info(str, ...)
+#define info(str, ...) (void*)(0)
 #endif
 #else
-#define err(str)
-#define info(str, ...)
+#define err(str) (void*)(0)
+#define info(str, ...) (void*)(0)
 #endif
 
 static volatile int threads_keepalive;
@@ -77,10 +77,10 @@ typedef struct jobqueue{
 
 /* Thread */
 typedef struct thread{
+    list_head_t list;
 	int       id;                        /* friendly id               */
 	pthread_t pthread;                   /* pointer to actual thread  */
 	struct thpool_* thpool_p;            /* access to thpool          */
-    list_head_t list;
 } thread;
 
 
@@ -102,7 +102,7 @@ typedef struct thpool_{
 /* ========================== PROTOTYPES ============================ */
 
 
-static int  thread_init(thpool_* thpool_p, list_head_t threads_list_head, int id);
+static int  thread_init(thpool_* thpool_p, int id);
 static void* thread_do(struct thread* thread_p);
 static void  thread_hold(int sig_id);
 static void  thread_destroy(struct thread* thread_p);
@@ -172,7 +172,7 @@ struct thpool_* thpool_init(int num_threads){
 	/* Thread init */
 	int n;
 	for (n=0; n<num_threads; n++){
-		thread_init(thpool_p, thpool_p->threads_list_head, n);
+		thread_init(thpool_p, n);
 //		thread_init(thpool_p, &thpool_p->threads[n], n);
 #if THPOOL_DEBUG
 			printf("THPOOL_DEBUG: Created thread %d in pool \n", n);
@@ -260,9 +260,14 @@ void thpool_destroy(thpool_* thpool_p){
 		thread_destroy(thpool_p->threads[n]);
 	}
 #endif
-    struct thread* thread_p;
-    list_for_each_entry(thread_p, &thpool_p->threads_list_head, list)
+    info("%s+%d\n", __func__, __LINE__);
+    struct thread *thread_p, *tmp;
+    list_for_each_entry_safe(thread_p, tmp, &thpool_p->threads_list_head, list)
+    {
+        info("%s+%d: thread_p = %p\n", __func__, __LINE__, thread_p);
+        list_del(&thread_p->list);
         free(thread_p);
+    }
 //	free(thpool_p->threads);
 	free(thpool_p);
 }
@@ -278,7 +283,10 @@ void thpool_pause(thpool_* thpool_p) {
 #endif
     struct thread* thread_p;
     list_for_each_entry(thread_p, &thpool_p->threads_list_head, list)
+    {
         pthread_kill(thread_p->pthread, SIGUSR1);
+        info("%s+%d\n", __func__, __LINE__);
+    }
 }
 
 
@@ -303,7 +311,7 @@ int thpool_double(thpool_* thpool_p) {
     int num_threads = thpool_p->num_threads_alive;
     int errno;
     for (n=num_threads; n<2*num_threads; n++){
-        errno = thread_init(thpool_p, thpool_p->threads_list_head, n);
+        errno = thread_init(thpool_p, n);
         if (errno != 0)
             return errno;
 #if THPOOL_DEBUG
@@ -317,23 +325,14 @@ int thpool_double(thpool_* thpool_p) {
 }
 
 int thpool_half(thpool_* thpool_p) {
+    int num_threads = thpool_p->num_threads_alive;
+    thpool_pause(thpool_p); 
+    
     return 0;
 }
 
 void thpool_scale(thpool_* thpool_p) {
     int errno;
-#if 0
-    if (thpool_num_threads_working(thpool_p) > (thpool_p->num_threads_alive)/2) {
-        errno = thpool_double(thpool_p);
-        if (errno != 0)
-            err("[Warning] thpool_double(): Could not double the number of threads\n");
-    }
-    else if(thpool_num_threads_working(thpool_p) < (thpool_p->num_threads_alive)/4) {
-        errno = thpool_half(thpool_p);
-        if (errno != 0)
-            err("[Warning] thpool_half(): Could not half the number of threads\n");
-    }
-#else
     info("[thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive] = [%d,%d]\n", 
             thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive);
     if (thpool_num_threads_working(thpool_p) > 0.8*(thpool_p->num_threads_alive)) 
@@ -349,11 +348,11 @@ void thpool_scale(thpool_* thpool_p) {
         if (errno != 0)
             err("[Warning] thpool_half(): Could not half the number of threads\n");
     }
-#endif
 }
 
 void thpool_scale_deamon(thpool_* thpool_p) {
     int errno;
+    int flag = 1;
     while(1) {
         if (thpool_num_threads_working(thpool_p) > 0.8*(thpool_p->num_threads_alive)) 
         {
@@ -363,8 +362,10 @@ void thpool_scale_deamon(thpool_* thpool_p) {
             if (errno != 0)
                 err("[Warning] thpool_double(): Could not double the number of threads\n");
         }
-        else if(thpool_num_threads_working(thpool_p) < 0.2*(thpool_p->num_threads_alive)) 
+        else if((thpool_p->num_threads_alive > 5) && (thpool_num_threads_working(thpool_p) < 0.2*(thpool_p->num_threads_alive)) && (flag == 0)) 
         {
+            info("thpool_half: [thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive] = [%d,%d]\n", thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive);
+            flag = 1;
             errno = thpool_half(thpool_p);
             if (errno != 0)
                 err("[Warning] thpool_half(): Could not half the number of threads\n");
@@ -384,7 +385,7 @@ void thpool_scale_deamon(thpool_* thpool_p) {
  * @param id            id to be given to the thread
  * @return 0 on success, -1 otherwise.
  */
-static int thread_init (thpool_* thpool_p, list_head_t threads_list_head, int id){
+static int thread_init (thpool_* thpool_p, int id){
 
     struct thread* thread_p = (struct thread*)malloc(sizeof(struct thread));
 	if (thread_p == NULL){
@@ -395,7 +396,14 @@ static int thread_init (thpool_* thpool_p, list_head_t threads_list_head, int id
 	(thread_p)->thpool_p = thpool_p;
 	(thread_p)->id       = id;
     INIT_LIST_HEAD(&thread_p->list);
-    list_add(&thread_p->list, &threads_list_head);
+    list_add(&thread_p->list, &thpool_p->threads_list_head);
+
+    struct thread* thread_pp;
+    info("%s+%d: thread_pp = %p, &thpool_p->threads_list_head = %p\n", __func__, __LINE__, thread_pp, &thpool_p->threads_list_head);
+    list_for_each_entry(thread_pp, &thpool_p->threads_list_head, list)
+    {
+        info("%s+%d: thread_pp = %p\n", __func__, __LINE__, thread_pp);
+    }
 
 	pthread_create(&(thread_p)->pthread, NULL, (void *)thread_do, (thread_p));
 	pthread_detach((thread_p)->pthread);
