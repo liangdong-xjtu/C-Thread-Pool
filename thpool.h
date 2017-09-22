@@ -11,6 +11,21 @@
 extern "C" {
 #endif
 
+#define LIST_ENABLE
+#define SCALE_ENABLE
+//#define HALF_ENABLE
+
+#ifndef LIST_ENABLE
+#undef SCALE_ENABLE
+#endif
+
+#ifndef SCALE_ENABLE
+#undef HALF_ENABLE
+#endif
+
+#define SCALE_DEAMON_SLEEP_INTERVAL 10*1000 // 10ms
+#define THPOOL_DESTROY_SLEEP_INTERVAL 10 // 10us
+
 /* =================================== API ======================================= */
 
 

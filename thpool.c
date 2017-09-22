@@ -86,8 +86,11 @@ typedef struct thread{
 
 /* Threadpool */
 typedef struct thpool_{
-//	thread**   threads;                  /* pointer to threads        */
+#ifndef LIST_ENABLE
+	thread**   threads;                  /* pointer to threads        */
+#else
     list_head_t threads_list_head;
+#endif
 	volatile int num_threads_alive;      /* threads currently alive   */
 	volatile int num_threads_working;    /* threads currently working */
 	pthread_mutex_t  thcount_lock;       /* used for thread count etc */
@@ -102,7 +105,8 @@ typedef struct thpool_{
 /* ========================== PROTOTYPES ============================ */
 
 
-static int  thread_init(thpool_* thpool_p, int id);
+static int thread_init (thpool_* thpool_p, struct thread** thread_p, int id);
+static int thread_init_list(thpool_* thpool_p, int id);
 static void* thread_do(struct thread* thread_p);
 static void  thread_hold(int sig_id);
 static void  thread_destroy(struct thread* thread_p);
@@ -155,15 +159,16 @@ struct thpool_* thpool_init(int num_threads){
 	}
 
 	/* Make threads in pool */
-//	thpool_p->threads = (struct thread**)malloc(num_threads * sizeof(struct thread *));
-    INIT_LIST_HEAD(&thpool_p->threads_list_head);
-#if 0
+#ifndef LIST_ENABLE
+	thpool_p->threads = (struct thread**)malloc(num_threads * sizeof(struct thread *));
 	if (thpool_p->threads == NULL){
 		err("thpool_init(): Could not allocate memory for threads\n");
 		jobqueue_destroy(&thpool_p->jobqueue);
 		free(thpool_p);
 		return NULL;
 	}
+#else
+    INIT_LIST_HEAD(&thpool_p->threads_list_head);
 #endif
 
 	pthread_mutex_init(&(thpool_p->thcount_lock), NULL);
@@ -171,9 +176,13 @@ struct thpool_* thpool_init(int num_threads){
 
 	/* Thread init */
 	int n;
+#ifndef LIST_ENABLE
 	for (n=0; n<num_threads; n++){
-		thread_init(thpool_p, n);
-//		thread_init(thpool_p, &thpool_p->threads[n], n);
+		thread_init(thpool_p, &thpool_p->threads[n], n);
+#else
+	for (n=0; n<num_threads; n++){
+		thread_init_list(thpool_p, n);
+#endif
 #if THPOOL_DEBUG
 			printf("THPOOL_DEBUG: Created thread %d in pool \n", n);
 #endif
@@ -181,9 +190,10 @@ struct thpool_* thpool_init(int num_threads){
 
 	/* Wait for threads to initialize */
 	while (thpool_p->num_threads_alive != num_threads) {}
+#ifdef SCALE_ENABLE
     pthread_t pthread;
     pthread_create(&pthread, NULL, (void *)thpool_scale_deamon, thpool_p);
-
+#endif
 	return thpool_p;
 }
 
@@ -240,53 +250,53 @@ void thpool_destroy(thpool_* thpool_p){
 		time (&end);
 		tpassed = difftime(end,start);
 	}
-    info("%s+%d\n", __func__, __LINE__);
 
 	/* Poll remaining threads */
 	while (thpool_p->num_threads_alive){
 		bsem_post_all(thpool_p->jobqueue.has_jobs);
-		usleep(100);
+		usleep(THPOOL_DESTROY_SLEEP_INTERVAL);
         info("%s+%d: thpool_num_threads_working(thpool_p) = %d\n", __func__, __LINE__, thpool_num_threads_working(thpool_p));
         info("%s+%d: thpool_p->num_threads_alive = %d\n", __func__, __LINE__, thpool_p->num_threads_alive);
 	}
-    info("%s+%d\n", __func__, __LINE__);
 
 	/* Job queue cleanup */
 	jobqueue_destroy(&thpool_p->jobqueue);
 	/* Deallocs */
+#ifndef LIST_ENABLE
 	int n;
-#if 0    
 	for (n=0; n < threads_total; n++){
 		thread_destroy(thpool_p->threads[n]);
 	}
-#endif
-    info("%s+%d\n", __func__, __LINE__);
+	free(thpool_p->threads);
+#else
     struct thread *thread_p, *tmp;
     list_for_each_entry_safe(thread_p, tmp, &thpool_p->threads_list_head, list)
     {
         info("%s+%d: thread_p = %p\n", __func__, __LINE__, thread_p);
         list_del(&thread_p->list);
-        free(thread_p);
+        free(thread_p); // namely: thread_destroy(thread_p);
     }
-//	free(thpool_p->threads);
+#endif
 	free(thpool_p);
+    info("%s+%d\n", __func__, __LINE__);
 }
 
 
 /* Pause all threads in threadpool */
 void thpool_pause(thpool_* thpool_p) {
+#ifndef LIST_ENABLE
 	int n;
-#if 0
 	for (n=0; n < thpool_p->num_threads_alive; n++){
 		pthread_kill(thpool_p->threads[n]->pthread, SIGUSR1);
 	}
-#endif
+#else
     struct thread* thread_p;
     list_for_each_entry(thread_p, &thpool_p->threads_list_head, list)
     {
         pthread_kill(thread_p->pthread, SIGUSR1);
         info("%s+%d\n", __func__, __LINE__);
     }
+#endif
 }
 
 
@@ -311,7 +321,9 @@ int thpool_double(thpool_* thpool_p) {
     int num_threads = thpool_p->num_threads_alive;
     int errno;
     for (n=num_threads; n<2*num_threads; n++){
-        errno = thread_init(thpool_p, n);
+        if (threads_keepalive == 0) // if thpool_destroy() is called, no need to create new threads
+            return 0;
+        errno = thread_init_list(thpool_p, n);
         if (errno != 0)
             return errno;
 #if THPOOL_DEBUG
@@ -331,6 +343,7 @@ int thpool_half(thpool_* thpool_p) {
     return 0;
 }
 
+#if 0
 void thpool_scale(thpool_* thpool_p) {
     int errno;
     info("[thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive] = [%d,%d]\n", 
@@ -349,10 +362,11 @@ void thpool_scale(thpool_* thpool_p) {
             err("[Warning] thpool_half(): Could not half the number of threads\n");
     }
 }
+#endif
 
 void thpool_scale_deamon(thpool_* thpool_p) {
     int errno;
-    int flag = 1;
+    int halfed = 0;
     while(1) {
         if (thpool_num_threads_working(thpool_p) > 0.8*(thpool_p->num_threads_alive)) 
         {
@@ -362,15 +376,18 @@ void thpool_scale_deamon(thpool_* thpool_p) {
             if (errno != 0)
                 err("[Warning] thpool_double(): Could not double the number of threads\n");
         }
-        else if((thpool_p->num_threads_alive > 5) && (thpool_num_threads_working(thpool_p) < 0.2*(thpool_p->num_threads_alive)) && (flag == 0)) 
+#ifdef HALF_ENABLE
+        else if((thpool_p->num_threads_alive > 5) && (thpool_num_threads_working(thpool_p) < 0.2*(thpool_p->num_threads_alive)) && (halfed == 0)) 
         {
-            info("thpool_half: [thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive] = [%d,%d]\n", thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive);
-            flag = 1;
+            info("thpool_half: [thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive] = [%d,%d]\n", 
+                    thpool_num_threads_working(thpool_p), thpool_p->num_threads_alive);
+            halfed = 1;
             errno = thpool_half(thpool_p);
             if (errno != 0)
                 err("[Warning] thpool_half(): Could not half the number of threads\n");
         }
-        usleep(10*1000);
+#endif
+        usleep(SCALE_DEAMON_SLEEP_INTERVAL);
     }
 }
 
@@ -385,7 +402,7 @@ void thpool_scale_deamon(thpool_* thpool_p) {
  * @param id            id to be given to the thread
  * @return 0 on success, -1 otherwise.
  */
-static int thread_init (thpool_* thpool_p, int id){
+static int thread_init_list (thpool_* thpool_p, int id){
 
     struct thread* thread_p = (struct thread*)malloc(sizeof(struct thread));
 	if (thread_p == NULL){
@@ -395,21 +412,39 @@ static int thread_init (thpool_* thpool_p, int id){
 
 	(thread_p)->thpool_p = thpool_p;
 	(thread_p)->id       = id;
+#ifdef LIST_ENABLE
     INIT_LIST_HEAD(&thread_p->list);
     list_add(&thread_p->list, &thpool_p->threads_list_head);
-
+#if THPOOL_DEBUG
     struct thread* thread_pp;
     info("%s+%d: thread_pp = %p, &thpool_p->threads_list_head = %p\n", __func__, __LINE__, thread_pp, &thpool_p->threads_list_head);
     list_for_each_entry(thread_pp, &thpool_p->threads_list_head, list)
     {
         info("%s+%d: thread_pp = %p\n", __func__, __LINE__, thread_pp);
     }
+#endif
+#endif
 
 	pthread_create(&(thread_p)->pthread, NULL, (void *)thread_do, (thread_p));
 	pthread_detach((thread_p)->pthread);
 	return 0;
 }
 
+static int thread_init (thpool_* thpool_p, struct thread** thread_p, int id){
+
+    *thread_p = (struct thread*)malloc(sizeof(struct thread));
+    if (thread_p == NULL){
+        err("thread_init(): Could not allocate memory for thread\n");
+        return -1;
+    }
+
+    (*thread_p)->thpool_p = thpool_p;
+    (*thread_p)->id       = id;
+
+    pthread_create(&(*thread_p)->pthread, NULL, (void *)thread_do, (*thread_p));
+    pthread_detach((*thread_p)->pthread);
+    return 0;
+}
 
 /* Sets the calling thread on hold */
 static void thread_hold(int sig_id) {
