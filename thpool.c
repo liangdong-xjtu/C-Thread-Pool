@@ -22,6 +22,7 @@
 #endif
 
 #include "thpool.h"
+#include "MemBarrier.h"
 
 #ifdef THPOOL_DEBUG
 #define THPOOL_DEBUG 1
@@ -56,6 +57,11 @@ typedef struct bsem {
 	int v;
 } bsem;
 
+typedef struct pollsem {
+    pthread_mutex_t mutex;
+    volatile int v;
+} pollsem;
+
 
 /* Job */
 typedef struct job{
@@ -71,6 +77,7 @@ typedef struct jobqueue{
 	job  *front;                         /* pointer to front of queue */
 	job  *rear;                          /* pointer to rear  of queue */
 	bsem *has_jobs;                      /* flag as binary semaphore  */
+    pollsem *poll_flag;                  /* flag as pollsem for poll  */
 	int   len;                           /* number of jobs in queue   */
 } jobqueue;
 
@@ -124,9 +131,10 @@ static void  bsem_post(struct bsem *bsem_p);
 static void  bsem_post_all(struct bsem *bsem_p);
 static void  bsem_wait(struct bsem *bsem_p);
 
-
-
-
+static void  pollsem_init(pollsem *pollsem_p, int value);
+static void  pollsem_reset(struct pollsem *pollsem_p);
+static void  pollsem_post(struct pollsem *pollsem_p);
+static void  pollsem_wait(struct pollsem *pollsem_p);
 
 /* ========================== THREADPOOL ============================ */
 
@@ -246,14 +254,22 @@ void thpool_destroy(thpool_* thpool_p){
 	double tpassed = 0.0;
 	time (&start);
 	while (tpassed < TIMEOUT && thpool_p->num_threads_alive){
+#ifndef POLL_THREADS_ENABLE
 		bsem_post_all(thpool_p->jobqueue.has_jobs);
+#else
+		pollsem_post(thpool_p->jobqueue.poll_flag);
+#endif
 		time (&end);
 		tpassed = difftime(end,start);
 	}
 
 	/* Poll remaining threads */
 	while (thpool_p->num_threads_alive){
+#ifndef POLL_THREADS_ENABLE
 		bsem_post_all(thpool_p->jobqueue.has_jobs);
+#else
+		pollsem_post(thpool_p->jobqueue.poll_flag);
+#endif
 		usleep(THPOOL_DESTROY_SLEEP_INTERVAL);
         info("%s+%d: thpool_num_threads_working(thpool_p) = %d\n", __func__, __LINE__, thpool_num_threads_working(thpool_p));
         info("%s+%d: thpool_p->num_threads_alive = %d\n", __func__, __LINE__, thpool_p->num_threads_alive);
@@ -495,7 +511,7 @@ static void* thread_do(struct thread* thread_p){
 	pthread_mutex_lock(&thpool_p->thcount_lock);
 	thpool_p->num_threads_alive += 1;
 	pthread_mutex_unlock(&thpool_p->thcount_lock);
-
+#ifndef POLL_THREADS_ENABLE
 	while(threads_keepalive){
 
 		bsem_wait(thpool_p->jobqueue.has_jobs);
@@ -526,6 +542,55 @@ static void* thread_do(struct thread* thread_p){
 
 		}
 	}
+#else   
+    while(threads_keepalive){
+        if (thread_p->id > 0) {
+            usleep(OTHER_THREADS_SLEEP_INTERVAL);
+        }
+        pollsem_wait(thpool_p->jobqueue.poll_flag);
+        if (threads_keepalive){
+
+            volatile int errcode = 1;
+            do {
+                errcode = pthread_mutex_trylock(&thpool_p->thcount_lock);
+                if (errcode != 0) {
+                    /* Wait short time before try lock again */
+                    com_dsb();
+                }
+            } while(errcode);
+            thpool_p->num_threads_working++;
+            if (errcode == 0)
+                pthread_mutex_unlock(&thpool_p->thcount_lock);
+
+            /* Read job from queue and execute it */
+            void (*func_buff)(void*);
+            void*  arg_buff;
+            job* job_p = jobqueue_pull(&thpool_p->jobqueue);
+            if (job_p) {
+                func_buff = job_p->function;
+                arg_buff  = job_p->arg;
+                func_buff(arg_buff);
+                free(job_p);
+            }
+
+            do {
+                errcode = pthread_mutex_trylock(&thpool_p->thcount_lock);
+                if (errcode != 0) {
+                    /* Wait short time before try lock again */
+                    com_dsb();
+                }
+            } while(errcode);
+            thpool_p->num_threads_working--;
+            if (!thpool_p->num_threads_working) {
+                pthread_cond_signal(&thpool_p->threads_all_idle);
+            }
+            if (errcode == 0)
+                pthread_mutex_unlock(&thpool_p->thcount_lock);
+
+        }
+    }
+#endif
+	
 	pthread_mutex_lock(&thpool_p->thcount_lock);
 	thpool_p->num_threads_alive --;
 	pthread_mutex_unlock(&thpool_p->thcount_lock);
@@ -556,9 +621,14 @@ static int jobqueue_init(jobqueue* jobqueue_p){
 	if (jobqueue_p->has_jobs == NULL){
 		return -1;
 	}
+	jobqueue_p->poll_flag = (struct pollsem*)malloc(sizeof(struct pollsem));
+	if (jobqueue_p->poll_flag == NULL){
+		return -1;
+	}
 
 	pthread_mutex_init(&(jobqueue_p->rwmutex), NULL);
 	bsem_init(jobqueue_p->has_jobs, 0);
+	pollsem_init(jobqueue_p->poll_flag, 0);
 
 	return 0;
 }
@@ -574,6 +644,7 @@ static void jobqueue_clear(jobqueue* jobqueue_p){
 	jobqueue_p->front = NULL;
 	jobqueue_p->rear  = NULL;
 	bsem_reset(jobqueue_p->has_jobs);
+	pollsem_reset(jobqueue_p->poll_flag);
 	jobqueue_p->len = 0;
 
 }
@@ -583,7 +654,18 @@ static void jobqueue_clear(jobqueue* jobqueue_p){
  */
 static void jobqueue_push(jobqueue* jobqueue_p, struct job* newjob){
 
+#ifndef POLL_THREADS_ENABLE
 	pthread_mutex_lock(&jobqueue_p->rwmutex);
+#else
+    volatile int errcode = 1;
+    do {
+        errcode = pthread_mutex_trylock(&jobqueue_p->rwmutex);
+        if (errcode != 0) {
+            /* Wait short time before try lock again */
+            com_dsb();
+        }
+    } while(errcode);
+#endif
 	newjob->prev = NULL;
 
 	switch(jobqueue_p->len){
@@ -600,8 +682,15 @@ static void jobqueue_push(jobqueue* jobqueue_p, struct job* newjob){
 	}
 	jobqueue_p->len++;
 
+#ifndef POLL_THREADS_ENABLE
 	bsem_post(jobqueue_p->has_jobs);
 	pthread_mutex_unlock(&jobqueue_p->rwmutex);
+#else
+    pollsem_post(jobqueue_p->poll_flag);
+    if (errcode == 0)
+        pthread_mutex_unlock(&jobqueue_p->rwmutex);
+#endif
+
 }
 
 
@@ -614,7 +703,18 @@ static void jobqueue_push(jobqueue* jobqueue_p, struct job* newjob){
  */
 static struct job* jobqueue_pull(jobqueue* jobqueue_p){
 
+#ifndef POLL_THREADS_ENABLE
 	pthread_mutex_lock(&jobqueue_p->rwmutex);
+#else
+    volatile int errcode = 1;
+    do {
+        errcode = pthread_mutex_trylock(&jobqueue_p->rwmutex);
+        if (errcode != 0) {
+            /* Wait short time before try lock again */
+            com_dsb();
+        }
+    } while(errcode);
+#endif
 	job* job_p = jobqueue_p->front;
 
 	switch(jobqueue_p->len){
@@ -632,11 +732,19 @@ static struct job* jobqueue_pull(jobqueue* jobqueue_p){
 					jobqueue_p->front = job_p->prev;
 					jobqueue_p->len--;
 					/* more than one job in queue -> post it */
+#ifndef POLL_THREADS_ENABLE
 					bsem_post(jobqueue_p->has_jobs);
+#else
+                    pollsem_post(jobqueue_p->poll_flag);
+#endif
 
 	}
-
+#ifndef POLL_THREADS_ENABLE
 	pthread_mutex_unlock(&jobqueue_p->rwmutex);
+#else
+    if (errcode == 0)
+        pthread_mutex_unlock(&jobqueue_p->rwmutex);
+#endif
 	return job_p;
 }
 
@@ -645,6 +753,7 @@ static struct job* jobqueue_pull(jobqueue* jobqueue_p){
 static void jobqueue_destroy(jobqueue* jobqueue_p){
 	jobqueue_clear(jobqueue_p);
 	free(jobqueue_p->has_jobs);
+	free(jobqueue_p->poll_flag);
 }
 
 
@@ -698,4 +807,62 @@ static void bsem_wait(bsem* bsem_p) {
 	}
 	bsem_p->v = 0;
 	pthread_mutex_unlock(&bsem_p->mutex);
+}
+
+
+/* Init semaphore to 1 or 0 */
+static void pollsem_init(pollsem *pollsem_p, int value) {
+    if (value < 0 || value > 1) {
+        err("pollsem_init(): Poll semaphore can take only values 1 or 0");
+        exit(1);
+    }
+    pthread_mutex_init(&(pollsem_p->mutex), NULL);
+    pollsem_p->v = value;
+}
+
+
+/* Reset semaphore to 0 */
+static void pollsem_reset(pollsem *pollsem_p) {
+    pollsem_init(pollsem_p, 0);
+}
+
+
+/* Post to at least one thread */
+static void pollsem_post(pollsem *pollsem_p) {
+    volatile int errcode = 1;
+    do {
+        errcode = pthread_mutex_trylock(&pollsem_p->mutex);
+        if (errcode != 0) {
+            /* Wait short time before try lock again */
+            com_dsb();
+        }
+    } while(errcode);
+    pollsem_p->v = 1;
+    if (errcode == 0)
+        pthread_mutex_unlock(&pollsem_p->mutex);
+}
+
+
+/* Wait on semaphore until semaphore has value 1 */
+static void pollsem_wait(pollsem* pollsem_p) {
+    volatile int errcode = 1;
+    while (1) {
+        do {
+            errcode = pthread_mutex_trylock(&pollsem_p->mutex);
+            if (errcode != 0) {
+                /* Wait short time before try lock again */
+                com_dsb();
+            }
+        } while(errcode);
+        if (pollsem_p->v == 1) {
+            pollsem_p->v = 0;
+            if (errcode == 0)
+                pthread_mutex_unlock(&pollsem_p->mutex);
+            break;
+        }
+        if (errcode == 0)
+            pthread_mutex_unlock(&pollsem_p->mutex);
+        /* Wait short time before try lock again */
+        com_dsb();
+    }
 }

@@ -11,6 +11,7 @@
 extern "C" {
 #endif
 
+#define POLL_THREADS_ENABLE
 #define LIST_ENABLE
 #define SCALE_ENABLE
 //#define HALF_ENABLE
@@ -25,6 +26,7 @@ extern "C" {
 
 #define SCALE_DEAMON_SLEEP_INTERVAL 10*1000 // 10ms
 #define THPOOL_DESTROY_SLEEP_INTERVAL 10 // 10us
+#define OTHER_THREADS_SLEEP_INTERVAL 1000*1000 // 1sec
 
 /* =================================== API ======================================= */
 
