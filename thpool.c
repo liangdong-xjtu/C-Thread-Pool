@@ -397,7 +397,7 @@ static int thread_init_list (thpool_* thpool_p, int id){
     INIT_LIST_HEAD(&thread_p->list);
     list_add(&thread_p->list, &thpool_p->threads_list_head);
 #if THPOOL_DEBUG
-    struct thread* thread_pp;
+    struct thread* thread_pp = NULL;
     info("%s+%d: thread_pp = %p, &thpool_p->threads_list_head = %p\n", __func__, __LINE__, thread_pp, &thpool_p->threads_list_head);
     list_for_each_entry(thread_pp, &thpool_p->threads_list_head, list)
     {
